@@ -47,7 +47,7 @@ def binary_classification_metrics(gt_aabbs, pred_aabbs):
     iou_thres = 0.7
 
     ious = 1 - compute_dist_mat_2(gt_aabbs, pred_aabbs)
-    match_counter = (ious > iou_thres).astype(np.int)
+    match_counter = (ious > iou_thres).astype(int)
     gt_counter = np.sum(match_counter, axis=1)
     pred_counter = np.sum(match_counter, axis=0)
 
