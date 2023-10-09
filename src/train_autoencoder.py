@@ -1,6 +1,7 @@
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torchvision import transforms  # Import the transforms module from torchvision
 from autoencoder import Autoencoder  # Import your autoencoder class
 from autoencoder_dataset import AutoencoderDataset  # Import your dataset class
 

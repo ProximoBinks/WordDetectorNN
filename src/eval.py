@@ -1,10 +1,8 @@
 import argparse
 from collections import namedtuple
-
 import numpy as np
 import torch
 from path import Path
-
 from aabb import AABB
 from aabb_clustering import cluster_aabbs
 from coding import decode, fg_by_cc
@@ -16,8 +14,10 @@ from net import WordDetectorNet
 from utils import compute_scale_down
 from visualization import visualize_and_plot
 
-EvaluateRes = namedtuple('EvaluateRes', 'batch_imgs,batch_aabbs,loss,metrics')
+# Import the Autoencoder models and feature extraction function
+from autoencoder import Autoencoder, extract_features_using_autoencoder
 
+EvaluateRes = namedtuple('EvaluateRes', 'batch_imgs,batch_aabbs,loss,metrics,feature_vectors')
 
 class BinaryClassificationMetrics:
     def __init__(self, tp, fp, fn):
@@ -42,29 +42,48 @@ class BinaryClassificationMetrics:
         pr = self.precision()
         return 2 * pr * re / (pr + re) if pr + re > 0 else 0
 
-
 def binary_classification_metrics(gt_aabbs, pred_aabbs):
     iou_thres = 0.7
-
     ious = 1 - compute_dist_mat_2(gt_aabbs, pred_aabbs)
     match_counter = (ious > iou_thres).astype(int)
     gt_counter = np.sum(match_counter, axis=1)
     pred_counter = np.sum(match_counter, axis=0)
-
     tp = np.count_nonzero(pred_counter == 1)
     fp = np.count_nonzero(pred_counter == 0)
     fn = np.count_nonzero(gt_counter == 0)
-
     return BinaryClassificationMetrics(tp, fp, fn)
 
+def determine_writer_id(image):
+    # Implement your logic here to determine the writer's ID based on the image.
+    # This can vary depending on your dataset and requirements.
+    # For the sake of this example, we'll assume a basic mapping based on image filenames.
+    # You may need to adjust this logic according to your specific dataset structure.
+    
+    # Example: If your image filenames follow a pattern like "writerID_imageNumber.png"
+    # You can extract the writer ID from the filename like this:
+    
+    filename = image  # Assuming the image parameter is the filename or path
+    parts = filename.split('_')
+    if len(parts) >= 2:
+        writer_id = int(parts[0])  # Assuming the writer ID is the first part before underscore
+        return writer_id
 
-def evaluate(net, loader, thres=0.5, max_aabbs=None):
+    # If the filename doesn't match the expected pattern, return a default writer ID.
+    return 0  # You can choose a default writer ID based on your dataset.
+
+# Example usage:
+image_filename = "1_image123.png"
+writer_id = determine_writer_id(image_filename)
+print(f"Writer ID: {writer_id}")
+
+
+def evaluate(net, loader, thres=0.5, max_aabbs=None, autoencoders=None):
     batch_imgs = []
     batch_aabbs = []
     loss = 0
+    feature_vectors = []
 
     for i in range(len(loader)):
-        # get batch
         loader_item = loader[i]
         with torch.no_grad():
             y = net(loader_item.batch_imgs, apply_softmax=True)
@@ -80,18 +99,24 @@ def evaluate(net, loader, thres=0.5, max_aabbs=None):
 
             aabbs = decode(pred_map, comp_fg=fg_by_cc(thres, max_aabbs), f=scale_up)
             h, w = img_np.shape
-            aabbs = [aabb.clip(AABB(0, w - 1, 0, h - 1)) for aabb in aabbs]  # bounding box must be inside img
-            clustered_aabbs = cluster_aabbs(aabbs)
+            aabbs = [aabb.clip(AABB(0, w - 1, 0, h - 1)) for aabb in aabbs]
 
             if loader_item.batch_aabbs is not None:
-                curr_metrics = binary_classification_metrics(loader_item.batch_aabbs[i], clustered_aabbs)
+                curr_metrics = binary_classification_metrics(loader_item.batch_aabbs[i], aabbs)
                 metrics = metrics.accumulate(curr_metrics)
 
             batch_imgs.append(img_np)
-            batch_aabbs.append(clustered_aabbs)
+            batch_aabbs.append(aabbs)
 
-    return EvaluateRes(batch_imgs, batch_aabbs, loss / len(loader), metrics)
+            # Extract features using the corresponding autoencoder
+            if autoencoders is not None:
+                writer_id = determine_writer_id(img_np)  # Implement this function
+                if writer_id in autoencoders:
+                    autoencoder = autoencoders[writer_id]
+                    features = extract_features_using_autoencoder(img_np, autoencoder)
+                    feature_vectors.append(features)
 
+    return EvaluateRes(batch_imgs, batch_aabbs, loss / len(loader), metrics, feature_vectors)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -108,7 +133,19 @@ def main():
     dataset_eval = DatasetIAMSplit(dataset, 0, 10)
     loader = DataLoaderIAM(dataset_eval, args.batch_size, net.input_size, net.output_size)
 
-    res = evaluate(net, loader, max_aabbs=1000)
+    # Load the trained autoencoder models here
+    autoencoder_writer_1 = Autoencoder()
+    autoencoder_writer_1.load_state_dict(torch.load('autoencoder_1.pt'))
+    autoencoder_writer_1.to('cuda')
+
+    autoencoder_writer_2 = Autoencoder()
+    autoencoder_writer_2.load_state_dict(torch.load('autoencoder_2.pt'))
+    autoencoder_writer_2.to('cuda')
+
+    autoencoders = {1: autoencoder_writer_1, 2: autoencoder_writer_2}
+
+    res = evaluate(net, loader, max_aabbs=1000, autoencoders=autoencoders)
+
     print(f'Loss: {res.loss}')
     print(f'Recall: {res.metrics.recall()}')
     print(f'Precision: {res.metrics.precision()}')
@@ -116,7 +153,6 @@ def main():
 
     for img, aabbs in zip(res.batch_imgs, res.batch_aabbs):
         visualize_and_plot(img, aabbs)
-
 
 if __name__ == '__main__':
     main()
